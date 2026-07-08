@@ -1,0 +1,46 @@
+"""
+模組 4 — 「解讀 FP」練習場（FP Triage Gauntlet）
+================================================
+混合了幾種常見的誤報成因，外加『一個真的漏洞』藏在裡面。
+目的：練習分辨 True FP 與 True Positive，而不是「一律當成誤報關掉」。
+判讀答案見 expected-findings.md，先自己判、再對答案。
+"""
+import os
+import sqlite3
+
+from flask import request
+
+conn = sqlite3.connect(":memory:", check_same_thread=False)
+
+
+# CASE 1 — TRUE FALSE POSITIVE：不是攻擊者可控。
+# APP_TABLE 來自部署時由 ops 設定的環境變數，不是來自請求。
+# 有些掃描器把 os.environ 當 source，但這裡是「營運者可控的組態」，非外部輸入。
+APP_TABLE = os.environ.get("APP_TABLE", "events")
+
+
+def dump_events():
+    return conn.execute(f"SELECT * FROM {APP_TABLE}").fetchall()
+
+
+# CASE 2 — TRUE FALSE POSITIVE：taint 被 int() 清除。
+# 非數字輸入會在 int() 直接拋錯；真正到查詢的是一個 int，無法注入。
+def get_user():
+    uid = int(request.args.get("id", "0"))
+    return conn.execute(f"SELECT * FROM users WHERE id = {uid}").fetchone()
+
+
+# CASE 3 — TRUE FALSE POSITIVE：sink 不可達（dead code）。
+def legacy_export():
+    if False:  # 功能旗標關閉，永不執行
+        cmd = request.args.get("cmd")
+        os.system(cmd)  # unreachable
+    return "export disabled"
+
+
+# CASE 4 — REAL VULNERABILITY（true positive）藏在雜訊裡，不能誤判為 FP！
+# file 未經任何處理就拼進 shell 指令 -> command injection (CWE-78)。
+def open_report():
+    term = request.args.get("file")
+    os.system("cat /reports/" + term)  # 真實 command injection
+    return "ok"
