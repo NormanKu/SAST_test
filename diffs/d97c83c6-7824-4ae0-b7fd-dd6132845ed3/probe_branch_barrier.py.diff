@@ -1,0 +1,57 @@
+ """
+ 診斷探針 2 — 分支屏障 vs 分支丟 taint（Barrier Recognition Probe）
+ ==================================================================
+ 背景：probe 1 已證實 Mend 會做『直線函式』的跨函式傳播（1、2 層都追到）。
+ 但 ensure_allowed_table 是『有分支 + raise』的，直線 probe 無法代表它。
+ 本 probe 專門補這個變因。
+ 
+ 設計：length_checked() 跟 ensure_allowed_table() 一樣有 `if ...: raise; return x`，
+       但它的檢查是『長度』——跟注入安全完全無關。happy path 回傳的值仍然
+       100% 攻擊者可控，可注入。source / sink 都用已知的（request.args / os.system）。
+ 
+ 判讀（掃這一支，看 probe_branch_no_sanitize 有沒有冒 CWE-78）：
+   ▸ 被報   -> Mend 會穿過『有分支的自訂函式』傳播 taint。
+              => 那 list_records 沒被報，是因為 Mend 真的認出 allowlist 屏障
+                 （把值限縮成常數集合）-> 解讀 (A) 精準，成立。這是好消息。
+   ▸ 沒被報 -> Mend 只要函式含分支/raise 就把 taint 丟掉，與是否淨化無關。
+              => list_records 的『乾淨』是副作用 -> 解讀 (B) 限制，成立。
+                 這是 recall 風險：真實 code 裡任何 validation 形狀的 helper 都可能
+                 讓後面的真漏洞消失。這要寫進評估報告，而且要靠調 profile/depth 補。
+ 
+ 延伸：alnum_only() 是『轉換型』淨化（不是分支屏障）。若 probe_transform_sanitized
+       這支【沒被報】，代表 Mend 也認得這種字元過濾轉換是安全的（精準度更高）；
+       若【被報】，那它就是一個『真 FP』，正好拿來練 Custom Sanitizer。
+ """
++import shlex
+ import os
+ 
+ from flask import request
+ 
+ 
+ def length_checked(x):
+     # 有分支 + raise，形狀跟 ensure_allowed_table 一樣，但長度檢查『不淨化』：
+     # 回傳值仍是完整的攻擊者可控字串，可注入。
+     if len(x) > 4096:
+         raise ValueError("too long")
+     return x
+ 
+ 
+ def probe_branch_no_sanitize():
+     term = request.args.get("q", "")   # 已知 source
+     t = length_checked(term)           # 有分支但不淨化
+     os.system("echo " + t)             # 已知 sink -> 真實可注入
+     return "done"
+ 
+ 
+ def alnum_only(x):
+     # 轉換型淨化：只留英數字，輸出不可能含 shell/SQL 中繼字元 -> 實際安全。
+     return "".join(ch for ch in x if ch.isalnum())
+ 
+ 
+ def probe_transform_sanitized():
+     term = request.args.get("q", "")
+     t = alnum_only(term)               # 轉換型淨化（非分支屏障）
+-    os.system("echo " + t)             # 實際安全；被報的話就是真 FP
++  safe_t = shlex.quote(t)
++  os.system("echo " + safe_t)
+     return "done"
