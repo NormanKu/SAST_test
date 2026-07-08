@@ -1,0 +1,53 @@
+ """
+ 診斷探針 — 跨函式 taint 傳播測試（Inter-procedural Propagation Probe）
+ ====================================================================
+ 目的：判斷 Mend 這個 profile 到底有沒有在做「跨自訂函式」的 taint 傳播。
+ 
+ 控制變因：
+   - source 用『已知的』 request.args（Mend 一定認得）
+   - sink   用『已知的』 os.system（Mend 一定認得）
+   - 中間只夾一個純 pass-through 的自訂函式：不驗證、不轉換、不屏障，原樣傳回。
+ 
+ 判讀：
+   ▸ 若 `propagation_probe` 被報 CWE-78  -> Mend 有做跨函式傳播。
+       => 那 list_records 沒被報，是因為它『真的認出了 allowlist 屏障』（樂觀解讀成立）。
+   ▸ 若 `propagation_probe` 沒被報       -> Mend 這個 profile 不追跨函式傳播。
+       => list_records / handle_message / search 全是同一個結構性漏報（悲觀解讀成立），
+          這是 recall 缺口，真實專案風險高。
+ 
+ 延伸測試：把這支再跑一次，但這次調高 Depth Settings
+   （Max. Function Depth / Max. Variable Copy），或改用 Deep profile。
+   若調高後才被報 -> 問題是『深度設定太淺』，可調參解決。
+   若怎麼調都不報 -> 是引擎/profile 的能力上限。
+ """
++import shlex
+ import os
+ 
+ from flask import request
+ 
+ 
+ def _passthrough(x):
+     """純傳播子：原樣傳回，不做任何淨化或轉換。"""
+     return x
+ 
+ 
+ def propagation_probe():
+     term = request.args.get("q", "")   # 已知 source
+     t = _passthrough(term)             # 唯一變因：跨一次自訂函式
+-    os.system("echo " + t)             # 已知 sink -> 真實 command injection
++  # Sanitize the user input to prevent command injection
++  safe_t = shlex.quote(t)
++  os.system("echo " + safe_t)
+     return "done"
+ 
+ 
+ def _wrap_two_hops(x):
+     """兩層呼叫，測更深的跨函式深度。"""
+     return _passthrough(x)
+ 
+ 
+ def propagation_probe_depth2():
+     term = request.args.get("q", "")
+     t = _wrap_two_hops(term)           # 跨兩層自訂函式
+     os.system("echo " + t)
+     return "done"
